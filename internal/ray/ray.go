@@ -2,7 +2,7 @@
 // (non-SIMD) path tracer.
 package ray
 
-import "github.com/adwaiy/simd-raytracer/internal/vec3"
+import "github.com/adwaiyrandale/simd-raytracer/internal/vec3"
 
 type Ray struct {
 	Origin    vec3.Vec3

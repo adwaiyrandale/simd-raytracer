@@ -1,4 +1,4 @@
-module github.com/adwaiy/simd-raytracer
+module github.com/adwaiyrandale/simd-raytracer
 
 go 1.27
 

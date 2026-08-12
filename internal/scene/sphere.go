@@ -5,8 +5,8 @@ package scene
 import (
 	"math"
 
-	"github.com/adwaiy/simd-raytracer/internal/ray"
-	"github.com/adwaiy/simd-raytracer/internal/vec3"
+	"github.com/adwaiyrandale/simd-raytracer/internal/ray"
+	"github.com/adwaiyrandale/simd-raytracer/internal/vec3"
 )
 
 type Sphere struct {

@@ -9,9 +9,9 @@ import (
 	"log"
 	"os"
 
-	"github.com/adwaiy/simd-raytracer/internal/ray"
-	"github.com/adwaiy/simd-raytracer/internal/scene"
-	"github.com/adwaiy/simd-raytracer/internal/vec3"
+	"github.com/adwaiyrandale/simd-raytracer/internal/ray"
+	"github.com/adwaiyrandale/simd-raytracer/internal/scene"
+	"github.com/adwaiyrandale/simd-raytracer/internal/vec3"
 )
 
 const (

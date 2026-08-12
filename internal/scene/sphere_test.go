@@ -3,8 +3,8 @@ package scene
 import (
 	"testing"
 
-	"github.com/adwaiy/simd-raytracer/internal/ray"
-	"github.com/adwaiy/simd-raytracer/internal/vec3"
+	"github.com/adwaiyrandale/simd-raytracer/internal/ray"
+	"github.com/adwaiyrandale/simd-raytracer/internal/vec3"
 )
 
 func TestSphereHit(t *testing.T) {
