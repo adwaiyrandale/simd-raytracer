@@ -28,7 +28,7 @@ func (b AABB) Hit(r ray.Ray, tMin, tMax float32) bool {
 		if t1 < tMax {
 			tMax = t1
 		}
-		if tMax <= tMin {
+		if tMax < tMin {
 			return false
 		}
 	}

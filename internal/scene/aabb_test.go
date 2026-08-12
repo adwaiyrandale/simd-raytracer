@@ -32,6 +32,17 @@ func TestAABBHitOutOfTRange(t *testing.T) {
 	}
 }
 
+func TestAABBHitDegenerateFlatBox(t *testing.T) {
+	// A box with zero thickness along one axis (e.g. a bounding box over
+	// coplanar triangles) must still register a hit when a ray passes
+	// exactly through that plane, not reject it as an empty interval.
+	box := AABB{Min: vec3.Vec3{X: -5, Y: -5, Z: -10}, Max: vec3.Vec3{X: 5, Y: 5, Z: -10}}
+	r := ray.Ray{Origin: vec3.Vec3{X: 0, Y: 0, Z: 0}, Direction: vec3.Vec3{X: 0.1, Y: -0.3, Z: -0.9}.Normalize()}
+	if !box.Hit(r, 0.001, 1000) {
+		t.Errorf("expected hit on degenerate flat box")
+	}
+}
+
 func TestAABBUnion(t *testing.T) {
 	a := AABB{Min: vec3.Vec3{X: -1, Y: 0, Z: 0}, Max: vec3.Vec3{X: 0, Y: 1, Z: 1}}
 	b := AABB{Min: vec3.Vec3{X: 0, Y: -1, Z: -1}, Max: vec3.Vec3{X: 1, Y: 0, Z: 0}}
