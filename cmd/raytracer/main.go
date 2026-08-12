@@ -13,6 +13,7 @@ import (
 	"os"
 
 	"github.com/adwaiyrandale/simd-raytracer/internal/bvh"
+	"github.com/adwaiyrandale/simd-raytracer/internal/camera"
 	"github.com/adwaiyrandale/simd-raytracer/internal/mesh"
 	"github.com/adwaiyrandale/simd-raytracer/internal/ray"
 	"github.com/adwaiyrandale/simd-raytracer/internal/scene"
@@ -27,14 +28,23 @@ const (
 func main() {
 	objPath := flag.String("obj", "", "path to a Wavefront OBJ file to render (renders a demo sphere if empty)")
 	outPath := flag.String("out", "out.ppm", "output PPM path")
+	camX := flag.Float64("camX", 0, "camera position X (default: straight-on view)")
+	camY := flag.Float64("camY", 0, "camera position Y")
+	camZ := flag.Float64("camZ", 0, "camera position Z")
+	lookX := flag.Float64("lookX", 0, "camera look-at target X")
+	lookY := flag.Float64("lookY", 0, "camera look-at target Y")
+	lookZ := flag.Float64("lookZ", -1, "camera look-at target Z")
 	flag.Parse()
 
-	if err := run(*objPath, *outPath); err != nil {
+	lookfrom := vec3.Vec3{X: float32(*camX), Y: float32(*camY), Z: float32(*camZ)}
+	lookat := vec3.Vec3{X: float32(*lookX), Y: float32(*lookY), Z: float32(*lookZ)}
+
+	if err := run(*objPath, *outPath, lookfrom, lookat); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(objPath, outPath string) error {
+func run(objPath, outPath string, lookfrom, lookat vec3.Vec3) error {
 	f, err := os.Create(outPath)
 	if err != nil {
 		return err
@@ -45,6 +55,7 @@ func run(objPath, outPath string) error {
 	defer w.Flush()
 
 	light := vec3.Vec3{X: -1, Y: 1, Z: 1}.Normalize()
+	cam := camera.New(lookfrom, lookat, vec3.Vec3{X: 0, Y: 1, Z: 0}, 90, float32(width)/float32(height))
 
 	var shadeFn func(r ray.Ray) vec3.Vec3
 	if objPath == "" {
@@ -58,7 +69,7 @@ func run(objPath, outPath string) error {
 		shadeFn = func(r ray.Ray) vec3.Vec3 { return shadeMesh(r, root, light) }
 	}
 
-	return renderPPM(w, shadeFn)
+	return renderPPM(w, cam, shadeFn)
 }
 
 // loadMeshBVH loads an OBJ file, translates its vertices by offset (so
@@ -85,31 +96,13 @@ func loadMeshBVH(path string, offset vec3.Vec3) (*bvh.Node, error) {
 	return bvh.Build(tris), nil
 }
 
-func renderPPM(w *bufio.Writer, shadeFn func(r ray.Ray) vec3.Vec3) error {
-	const aspect = float32(width) / float32(height)
-	const viewportHeight = 2.0
-	const viewportWidth = viewportHeight * aspect
-	const focalLength = 1.0
-
-	origin := vec3.Vec3{}
-	horizontal := vec3.Vec3{X: viewportWidth}
-	vertical := vec3.Vec3{Y: viewportHeight}
-	lowerLeft := origin.
-		Sub(horizontal.Scale(0.5)).
-		Sub(vertical.Scale(0.5)).
-		Sub(vec3.Vec3{Z: focalLength})
-
+func renderPPM(w *bufio.Writer, cam camera.Camera, shadeFn func(r ray.Ray) vec3.Vec3) error {
 	fmt.Fprintf(w, "P3\n%d %d\n255\n", width, height)
 	for j := height - 1; j >= 0; j-- {
 		for i := 0; i < width; i++ {
 			u := float32(i) / float32(width-1)
 			v := float32(j) / float32(height-1)
-			dir := lowerLeft.
-				Add(horizontal.Scale(u)).
-				Add(vertical.Scale(v)).
-				Sub(origin)
-			r := ray.Ray{Origin: origin, Direction: dir}
-			writeColor(w, shadeFn(r))
+			writeColor(w, shadeFn(cam.Ray(u, v)))
 		}
 	}
 	return w.Flush()
