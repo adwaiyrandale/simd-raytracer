@@ -10,6 +10,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
+	"math/rand"
 	"os"
 
 	"github.com/adwaiyrandale/simd-raytracer/internal/bvh"
@@ -31,17 +33,18 @@ func main() {
 	lookX := flag.Float64("lookX", 0, "camera look-at target X")
 	lookY := flag.Float64("lookY", 0, "camera look-at target Y")
 	lookZ := flag.Float64("lookZ", -1, "camera look-at target Z")
+	samplesPerPixel := flag.Int("spp", 16, "samples per pixel (antialiasing quality; 1 disables antialiasing)")
 	flag.Parse()
 
 	lookfrom := vec3.Vec3{X: float32(*camX), Y: float32(*camY), Z: float32(*camZ)}
 	lookat := vec3.Vec3{X: float32(*lookX), Y: float32(*lookY), Z: float32(*lookZ)}
 
-	if err := run(*objPath, *outPath, *width, *height, lookfrom, lookat); err != nil {
+	if err := run(*objPath, *outPath, *width, *height, *samplesPerPixel, lookfrom, lookat); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(objPath, outPath string, width, height int, lookfrom, lookat vec3.Vec3) error {
+func run(objPath, outPath string, width, height, samplesPerPixel int, lookfrom, lookat vec3.Vec3) error {
 	f, err := os.Create(outPath)
 	if err != nil {
 		return err
@@ -66,7 +69,7 @@ func run(objPath, outPath string, width, height int, lookfrom, lookat vec3.Vec3)
 		shadeFn = func(r ray.Ray) vec3.Vec3 { return shadeMesh(r, root, light) }
 	}
 
-	return renderPPM(w, width, height, cam, shadeFn)
+	return renderPPM(w, width, height, samplesPerPixel, cam, shadeFn)
 }
 
 // loadMeshBVH loads an OBJ file, translates its vertices by offset (so
@@ -93,13 +96,23 @@ func loadMeshBVH(path string, offset vec3.Vec3) (*bvh.Node, error) {
 	return bvh.Build(tris), nil
 }
 
-func renderPPM(w *bufio.Writer, width, height int, cam camera.Camera, shadeFn func(r ray.Ray) vec3.Vec3) error {
+// renderPPM antialiases via jittered supersampling: samplesPerPixel
+// rays are cast at random offsets within each pixel's footprint and
+// averaged. Without this, hard edges (silhouettes, the black triangle
+// edge lines) are aliased to a single hard pixel boundary and the
+// whole image reads as flat/blocky rather than a smooth 3D render.
+func renderPPM(w *bufio.Writer, width, height, samplesPerPixel int, cam camera.Camera, shadeFn func(r ray.Ray) vec3.Vec3) error {
+	rng := rand.New(rand.NewSource(1))
 	fmt.Fprintf(w, "P3\n%d %d\n255\n", width, height)
 	for j := height - 1; j >= 0; j-- {
 		for i := 0; i < width; i++ {
-			u := float32(i) / float32(width-1)
-			v := float32(j) / float32(height-1)
-			writeColor(w, shadeFn(cam.Ray(u, v)))
+			var sum vec3.Vec3
+			for s := 0; s < samplesPerPixel; s++ {
+				u := (float32(i) + rng.Float32()) / float32(width)
+				v := (float32(j) + rng.Float32()) / float32(height)
+				sum = sum.Add(shadeFn(cam.Ray(u, v)))
+			}
+			writeColor(w, sum.Scale(1/float32(samplesPerPixel)))
 		}
 	}
 	return w.Flush()
@@ -171,11 +184,22 @@ func skyColor(r ray.Ray) vec3.Vec3 {
 	return white.Scale(1 - t).Add(skyBlue.Scale(t))
 }
 
+// writeColor gamma-corrects (linear -> approx sRGB via sqrt, the
+// standard gamma-2 approximation) before writing 8-bit output.
+// Without this, colors written straight from linear light values look
+// flat and undersaturated on an sRGB-expecting display/viewer.
 func writeColor(w *bufio.Writer, c vec3.Vec3) {
-	r := clamp(c.X)
-	g := clamp(c.Y)
-	b := clamp(c.Z)
+	r := clamp(linearToGamma(c.X))
+	g := clamp(linearToGamma(c.Y))
+	b := clamp(linearToGamma(c.Z))
 	fmt.Fprintf(w, "%d %d %d\n", int(255*r), int(255*g), int(255*b))
+}
+
+func linearToGamma(x float32) float32 {
+	if x <= 0 {
+		return 0
+	}
+	return float32(math.Sqrt(float64(x)))
 }
 
 func clamp(x float32) float32 {
