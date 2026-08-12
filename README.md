@@ -14,28 +14,38 @@ BVH4 over triangle meshes. Design doc:
 
 ## Toolchain
 
-Phases 3+ require Go 1.27rc1 with `GOEXPERIMENT=simd` (the stable `go`
-on PATH here is too old). Install once:
+Phase 3+ SIMD code (`internal/simdvec`) requires Go 1.27rc1 with
+`GOEXPERIMENT=simd` (the stable `go` on PATH here is too old, and
+Go 1.26's `simd/archsimd` is amd64-only - useless on Apple Silicon).
+Install once:
 
 ```sh
 go install golang.org/dl/go1.27rc1@latest
 $(go env GOPATH)/bin/go1.27rc1 download
 ```
 
-Then build/run phase 3+ code with:
+Then test SIMD code with (note: `test`, not `build` - see the doc
+comment in `internal/simdvec/vec3s.go` for why `go build` on this
+package hits a confirmed go1.27rc1 compiler bug):
 
 ```sh
-GOEXPERIMENT=simd $(go env GOPATH)/bin/go1.27rc1 build ./...
+GOEXPERIMENT=simd $(go env GOPATH)/bin/go1.27rc1 test ./internal/simdvec/... -v -bench=.
 ```
 
-Phases 1-2 (scalar) build with any Go >= 1.21, no experiment flag needed.
+Everything else (`go build ./...`, `go test ./...`, no flags, any
+Go >= 1.21) continues to work exactly as before - the SIMD package is
+excluded from those by its own `//go:build goexperiment.simd` tag, so
+scalar development is unaffected.
 
 ## Layout
 
 - `internal/vec3` — 3D vector math (scalar).
 - `internal/ray` — ray type.
 - `internal/camera` — camera / primary ray generation.
-- `internal/scene` — scene description, spheres, materials.
-- `internal/scalar` — scalar (non-SIMD) path tracer, phase 1-2 baseline
-  and the correctness oracle for later SIMD phases.
+- `internal/scene` — scene description: spheres, triangles, AABBs.
+- `internal/mesh` — Wavefront OBJ loading.
+- `internal/bvh` — scalar bounding volume hierarchy.
+- `internal/simdvec` — phase-3 SIMD scaffold (SoA `Vec3s`, benchmarks
+  vs the scalar path). Not yet wired into the renderer - see its doc
+  comment for the toolchain caveats above.
 - `cmd/raytracer` — CLI entry point.
