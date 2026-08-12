@@ -1,4 +1,5 @@
 /bin/
 *.ppm
 *.png
+!/renders/*.png
 /.claude/
