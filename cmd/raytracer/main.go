@@ -20,14 +20,11 @@ import (
 	"github.com/adwaiyrandale/simd-raytracer/internal/vec3"
 )
 
-const (
-	width  = 400
-	height = 225
-)
-
 func main() {
 	objPath := flag.String("obj", "", "path to a Wavefront OBJ file to render (renders a demo sphere if empty)")
 	outPath := flag.String("out", "out.ppm", "output PPM path")
+	width := flag.Int("width", 400, "output image width in pixels")
+	height := flag.Int("height", 225, "output image height in pixels")
 	camX := flag.Float64("camX", 0, "camera position X (default: straight-on view)")
 	camY := flag.Float64("camY", 0, "camera position Y")
 	camZ := flag.Float64("camZ", 0, "camera position Z")
@@ -39,12 +36,12 @@ func main() {
 	lookfrom := vec3.Vec3{X: float32(*camX), Y: float32(*camY), Z: float32(*camZ)}
 	lookat := vec3.Vec3{X: float32(*lookX), Y: float32(*lookY), Z: float32(*lookZ)}
 
-	if err := run(*objPath, *outPath, lookfrom, lookat); err != nil {
+	if err := run(*objPath, *outPath, *width, *height, lookfrom, lookat); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(objPath, outPath string, lookfrom, lookat vec3.Vec3) error {
+func run(objPath, outPath string, width, height int, lookfrom, lookat vec3.Vec3) error {
 	f, err := os.Create(outPath)
 	if err != nil {
 		return err
@@ -69,7 +66,7 @@ func run(objPath, outPath string, lookfrom, lookat vec3.Vec3) error {
 		shadeFn = func(r ray.Ray) vec3.Vec3 { return shadeMesh(r, root, light) }
 	}
 
-	return renderPPM(w, cam, shadeFn)
+	return renderPPM(w, width, height, cam, shadeFn)
 }
 
 // loadMeshBVH loads an OBJ file, translates its vertices by offset (so
@@ -96,7 +93,7 @@ func loadMeshBVH(path string, offset vec3.Vec3) (*bvh.Node, error) {
 	return bvh.Build(tris), nil
 }
 
-func renderPPM(w *bufio.Writer, cam camera.Camera, shadeFn func(r ray.Ray) vec3.Vec3) error {
+func renderPPM(w *bufio.Writer, width, height int, cam camera.Camera, shadeFn func(r ray.Ray) vec3.Vec3) error {
 	fmt.Fprintf(w, "P3\n%d %d\n255\n", width, height)
 	for j := height - 1; j >= 0; j-- {
 		for i := 0; i < width; i++ {
