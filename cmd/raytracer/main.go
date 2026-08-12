@@ -34,12 +34,19 @@ func main() {
 	lookY := flag.Float64("lookY", 0, "camera look-at target Y")
 	lookZ := flag.Float64("lookZ", -1, "camera look-at target Z")
 	samplesPerPixel := flag.Int("spp", 16, "samples per pixel (antialiasing quality; 1 disables antialiasing)")
+	simdFlag := flag.Bool("simd", false, "render via the SIMD ray-packet path instead of scalar (requires building with GOEXPERIMENT=simd and go1.27rc1+)")
 	flag.Parse()
 
 	lookfrom := vec3.Vec3{X: float32(*camX), Y: float32(*camY), Z: float32(*camZ)}
 	lookat := vec3.Vec3{X: float32(*lookX), Y: float32(*lookY), Z: float32(*lookZ)}
 
-	if err := run(*objPath, *outPath, *width, *height, *samplesPerPixel, lookfrom, lookat); err != nil {
+	var err error
+	if *simdFlag {
+		err = renderSIMD(*objPath, *outPath, *width, *height, *samplesPerPixel, lookfrom, lookat)
+	} else {
+		err = run(*objPath, *outPath, *width, *height, *samplesPerPixel, lookfrom, lookat)
+	}
+	if err != nil {
 		log.Fatal(err)
 	}
 }
@@ -72,10 +79,11 @@ func run(objPath, outPath string, width, height, samplesPerPixel int, lookfrom, 
 	return renderPPM(w, width, height, samplesPerPixel, cam, shadeFn)
 }
 
-// loadMeshBVH loads an OBJ file, translates its vertices by offset (so
-// demo meshes authored around the origin land in front of the camera),
-// and builds a BVH over the result.
-func loadMeshBVH(path string, offset vec3.Vec3) (*bvh.Node, error) {
+// loadMeshTriangles loads an OBJ file and translates its vertices by
+// offset, so demo meshes authored around the origin land in front of
+// the camera. Shared by both the scalar (BVH-accelerated) and SIMD
+// (brute-force packet) render paths.
+func loadMeshTriangles(path string, offset vec3.Vec3) ([]scene.Triangle, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -92,6 +100,16 @@ func loadMeshBVH(path string, offset vec3.Vec3) (*bvh.Node, error) {
 			V1: tri.V1.Add(offset),
 			V2: tri.V2.Add(offset),
 		}
+	}
+	return tris, nil
+}
+
+// loadMeshBVH is loadMeshTriangles plus building a BVH over the
+// result, for the scalar render path.
+func loadMeshBVH(path string, offset vec3.Vec3) (*bvh.Node, error) {
+	tris, err := loadMeshTriangles(path, offset)
+	if err != nil {
+		return nil, err
 	}
 	return bvh.Build(tris), nil
 }
