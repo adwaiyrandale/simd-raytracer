@@ -108,27 +108,58 @@ func renderPPM(w *bufio.Writer, width, height int, cam camera.Camera, shadeFn fu
 func shadeSphere(r ray.Ray, s scene.Sphere, light vec3.Vec3) vec3.Vec3 {
 	if point, _, ok := s.Hit(r, 0.001, 1000); ok {
 		n := s.Normal(point)
-		return litColor(n, light, vec3.Vec3{X: 1, Y: 0.3, Z: 0.3})
+		return litColor(n, r.Direction, light, vec3.Vec3{X: 1, Y: 0.3, Z: 0.3})
 	}
 	return skyColor(r)
 }
+
+// edgeBarycentricThreshold controls how close (in barycentric-weight
+// units) a hit must be to a triangle edge before it's drawn as an
+// edge line rather than shaded normally. Without this, adjacent faces
+// at similar angles to the light have almost no contrast, so a 3D
+// mesh reads as a flat, ambiguous 2D shape.
+const edgeBarycentricThreshold = 0.02
 
 func shadeMesh(r ray.Ray, root *bvh.Node, light vec3.Vec3) vec3.Vec3 {
-	if hit, ok := root.Hit(r, 0.001, 1000); ok {
-		n := hit.Triangle.Normal()
-		return litColor(n, light, vec3.Vec3{X: 0.3, Y: 0.6, Z: 1})
+	hit, ok := root.Hit(r, 0.001, 1000)
+	if !ok {
+		return skyColor(r)
 	}
-	return skyColor(r)
+	u, v, w := hit.Triangle.Barycentric(hit.Point)
+	if minOf3(u, v, w) < edgeBarycentricThreshold {
+		return vec3.Vec3{} // black edge line
+	}
+	n := hit.Triangle.Normal()
+	return litColor(n, r.Direction, light, vec3.Vec3{X: 0.3, Y: 0.6, Z: 1})
 }
 
-// litColor applies simple Lambertian shading. It shades both faces of
-// a triangle the same way (abs of the dot product) since demo OBJ
-// assets aren't guaranteed consistently wound.
-func litColor(normal, light, baseColor vec3.Vec3) vec3.Vec3 {
-	intensity := normal.Dot(light)
-	if intensity < 0 {
-		intensity = -intensity
+func minOf3(a, b, c float32) float32 {
+	m := a
+	if b < m {
+		m = b
 	}
+	if c < m {
+		m = c
+	}
+	return m
+}
+
+// litColor applies Lambertian shading with a small ambient term so no
+// face goes fully black. The normal is flipped to face the viewer
+// first (rather than taking abs of the dot product), since demo OBJ
+// assets aren't guaranteed consistently wound and abs() would make
+// two differently-angled faces read as the same brightness whenever
+// their angles to the light happen to be mirror images.
+func litColor(normal, rayDir, light, baseColor vec3.Vec3) vec3.Vec3 {
+	if normal.Dot(rayDir) > 0 {
+		normal = normal.Scale(-1)
+	}
+	diffuse := normal.Dot(light)
+	if diffuse < 0 {
+		diffuse = 0
+	}
+	const ambient = 0.15
+	intensity := ambient + (1-ambient)*diffuse
 	return baseColor.Scale(intensity)
 }
 
