@@ -59,6 +59,39 @@ func TestTriangleMissParallel(t *testing.T) {
 	}
 }
 
+func TestTriangleBarycentricAtVertices(t *testing.T) {
+	tri := testTriangle()
+	cases := []struct {
+		name  string
+		point vec3.Vec3
+		wantU float32
+		wantV float32
+		wantW float32
+	}{
+		{"V0", tri.V0, 1, 0, 0},
+		{"V1", tri.V1, 0, 1, 0},
+		{"V2", tri.V2, 0, 0, 1},
+	}
+	const eps = 1e-4
+	for _, c := range cases {
+		u, v, w := tri.Barycentric(c.point)
+		if abs32(u-c.wantU) > eps || abs32(v-c.wantV) > eps || abs32(w-c.wantW) > eps {
+			t.Errorf("%s: Barycentric() = (%v, %v, %v), want (%v, %v, %v)", c.name, u, v, w, c.wantU, c.wantV, c.wantW)
+		}
+	}
+}
+
+func TestTriangleBarycentricAtCentroid(t *testing.T) {
+	tri := testTriangle()
+	centroid := tri.V0.Add(tri.V1).Add(tri.V2).Scale(1.0 / 3)
+	u, v, w := tri.Barycentric(centroid)
+	const eps = 1e-4
+	want := float32(1.0 / 3)
+	if abs32(u-want) > eps || abs32(v-want) > eps || abs32(w-want) > eps {
+		t.Errorf("centroid: Barycentric() = (%v, %v, %v), want all ~%v", u, v, w, want)
+	}
+}
+
 func TestTriangleNormal(t *testing.T) {
 	tri := testTriangle()
 	n := tri.Normal()
