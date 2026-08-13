@@ -75,6 +75,8 @@ func renderSIMD(objPath, outPath string, width, height, samplesPerPixel int, loo
 	rayBuf := make([]ray.Ray, lanes)
 	oxs, oys, ozs := make([]float32, lanes), make([]float32, lanes), make([]float32, lanes)
 	dxs, dys, dzs := make([]float32, lanes), make([]float32, lanes), make([]float32, lanes)
+	colorBuf := make([]vec3.Vec3, lanes)
+	scratch := newSIMDScratch(lanes)
 
 	for j := height - 1; j >= 0; j-- {
 		for i := range sums {
@@ -102,15 +104,14 @@ func renderSIMD(objPath, outPath string, width, height, samplesPerPixel int, loo
 				ox, oy, oz := simd.LoadFloat32s(oxs), simd.LoadFloat32s(oys), simd.LoadFloat32s(ozs)
 				dx, dy, dz := simd.LoadFloat32s(dxs), simd.LoadFloat32s(dys), simd.LoadFloat32s(dzs)
 
-				var colors []vec3.Vec3
 				if useMesh {
-					colors = simdShadeMesh(ox, oy, oz, dx, dy, dz, tris, rayBuf, light, lanes)
+					simdShadeMesh(ox, oy, oz, dx, dy, dz, tris, rayBuf, light, lanes, colorBuf, scratch)
 				} else {
-					colors = simdShadeSphere(ox, oy, oz, dx, dy, dz, sphere, rayBuf, light, lanes)
+					simdShadeSphere(ox, oy, oz, dx, dy, dz, sphere, rayBuf, light, lanes, colorBuf, scratch)
 				}
 
 				for lane := 0; lane < n; lane++ {
-					sums[i0+lane] = sums[i0+lane].Add(colors[lane])
+					sums[i0+lane] = sums[i0+lane].Add(colorBuf[lane])
 				}
 			}
 		}
@@ -220,48 +221,76 @@ func simdTriangleHit(ox, oy, oz, dx, dy, dz simd.Float32s, tri scene.Triangle, t
 	return tHit, px, py, pz, u, v, hit
 }
 
-// maskToFlags converts a Mask32s to a []float32 of 1s (true) and 0s
-// (false), one per lane. Mask32s.ToInt32s is declared in go1.27rc1's
-// stub surface but not actually implemented for this arm64 backend
-// yet ("Mask32x4 has no field or method ToInt32s" at compile time) -
-// this works around it using only IfElse/Store, both confirmed
-// working.
-func maskToFlags(mask simd.Mask32s, lanes int) []float32 {
-	flags := ifElseFixed(mask, simd.BroadcastFloat32s(1), simd.BroadcastFloat32s(0))
-	out := make([]float32, lanes)
-	flags.Store(out)
-	return out
+// simdScratch holds all the per-packet working buffers used by
+// simdShadeSphere/simdShadeMesh, allocated once by newSIMDScratch and
+// reused across every packet in a render. Without this, allocating
+// fresh slices inside the innermost per-triangle/per-packet loop
+// dominates render time far more than any SIMD math benefit -
+// measured via `go test -bench -benchmem` before this fix: ~1MB and
+// ~22k allocations per single mesh render, vs the scalar path's ~9KB
+// and 6 allocations. See bench_test.go's commit message for the full
+// before/after numbers.
+type simdScratch struct {
+	flagsBuf      []float32
+	nxs, nys, nzs []float32
+	us, vs        []float32
+	closestTriIdx []int
 }
 
-func simdShadeSphere(ox, oy, oz, dx, dy, dz simd.Float32s, sph scene.Sphere, rays []ray.Ray, light vec3.Vec3, lanes int) []vec3.Vec3 {
+func newSIMDScratch(lanes int) *simdScratch {
+	return &simdScratch{
+		flagsBuf:      make([]float32, lanes),
+		nxs:           make([]float32, lanes),
+		nys:           make([]float32, lanes),
+		nzs:           make([]float32, lanes),
+		us:            make([]float32, lanes),
+		vs:            make([]float32, lanes),
+		closestTriIdx: make([]int, lanes),
+	}
+}
+
+// maskToFlags converts a Mask32s to 1s (true) and 0s (false) into the
+// caller-provided out buffer (len must be >= lanes), one per lane.
+// Mask32s.ToInt32s is declared in go1.27rc1's stub surface but not
+// actually implemented for this arm64 backend yet ("Mask32x4 has no
+// field or method ToInt32s" at compile time) - this works around it
+// using only IfElse/Store, both confirmed working.
+func maskToFlags(mask simd.Mask32s, out []float32) {
+	flags := ifElseFixed(mask, simd.BroadcastFloat32s(1), simd.BroadcastFloat32s(0))
+	flags.Store(out)
+}
+
+// simdShadeSphere writes lanes shaded colors into out (len must be >=
+// lanes). scratch's buffers are reused, not allocated, per call.
+func simdShadeSphere(ox, oy, oz, dx, dy, dz simd.Float32s, sph scene.Sphere, rays []ray.Ray, light vec3.Vec3, lanes int, out []vec3.Vec3, scratch *simdScratch) {
 	_, _, _, _, nx, ny, nz, hit := simdSphereHit(ox, oy, oz, dx, dy, dz, sph, 0.001, 1000)
 
-	nxs, nys, nzs := make([]float32, lanes), make([]float32, lanes), make([]float32, lanes)
-	nx.Store(nxs)
-	ny.Store(nys)
-	nz.Store(nzs)
-	hitFlags := maskToFlags(hit, lanes)
+	nx.Store(scratch.nxs)
+	ny.Store(scratch.nys)
+	nz.Store(scratch.nzs)
+	maskToFlags(hit, scratch.flagsBuf)
 
-	out := make([]vec3.Vec3, lanes)
 	for i := 0; i < lanes; i++ {
-		if hitFlags[i] != 0 {
-			n := vec3.Vec3{X: nxs[i], Y: nys[i], Z: nzs[i]}
+		if scratch.flagsBuf[i] != 0 {
+			n := vec3.Vec3{X: scratch.nxs[i], Y: scratch.nys[i], Z: scratch.nzs[i]}
 			out[i] = litColor(n, rays[i].Direction, light, vec3.Vec3{X: 1, Y: 0.3, Z: 0.3})
 		} else {
 			out[i] = skyColor(rays[i])
 		}
 	}
-	return out
 }
 
-func simdShadeMesh(ox, oy, oz, dx, dy, dz simd.Float32s, tris []scene.Triangle, rays []ray.Ray, light vec3.Vec3, lanes int) []vec3.Vec3 {
+// simdShadeMesh writes lanes shaded colors into out (len must be >=
+// lanes). scratch's buffers are reused, not allocated, per call -
+// this includes the per-triangle loop below, which previously
+// allocated a fresh []float32 on every single triangle iteration.
+func simdShadeMesh(ox, oy, oz, dx, dy, dz simd.Float32s, tris []scene.Triangle, rays []ray.Ray, light vec3.Vec3, lanes int, out []vec3.Vec3, scratch *simdScratch) {
 	tMaxInit := float32(1000)
 	closestT := simd.BroadcastFloat32s(tMaxInit)
 	var closestU, closestV simd.Float32s
 	anyHit := simd.BroadcastFloat32s(0).GreaterEqual(simd.BroadcastFloat32s(1))
-	closestTriIdx := make([]int, lanes)
-	for i := range closestTriIdx {
-		closestTriIdx[i] = -1
+	for i := range scratch.closestTriIdx {
+		scratch.closestTriIdx[i] = -1
 	}
 
 	for triIdx, tri := range tris {
@@ -273,28 +302,26 @@ func simdShadeMesh(ox, oy, oz, dx, dy, dz simd.Float32s, tris []scene.Triangle, 
 		closestT = ifElseFixed(closer, t, closestT)
 		anyHit = anyHit.Or(closer)
 
-		closerFlags := maskToFlags(closer, lanes)
+		maskToFlags(closer, scratch.flagsBuf)
 		for lane := 0; lane < lanes; lane++ {
-			if closerFlags[lane] != 0 {
-				closestTriIdx[lane] = triIdx
+			if scratch.flagsBuf[lane] != 0 {
+				scratch.closestTriIdx[lane] = triIdx
 			}
 		}
 	}
 
-	us, vs := make([]float32, lanes), make([]float32, lanes)
-	closestU.Store(us)
-	closestV.Store(vs)
-	anyHitFlags := maskToFlags(anyHit, lanes)
+	closestU.Store(scratch.us)
+	closestV.Store(scratch.vs)
+	maskToFlags(anyHit, scratch.flagsBuf)
 
-	out := make([]vec3.Vec3, lanes)
 	for i := 0; i < lanes; i++ {
-		if anyHitFlags[i] == 0 {
+		if scratch.flagsBuf[i] == 0 {
 			out[i] = skyColor(rays[i])
 			continue
 		}
-		triIdx := closestTriIdx[i]
-		bw := us[i]
-		bv := vs[i]
+		triIdx := scratch.closestTriIdx[i]
+		bw := scratch.us[i]
+		bv := scratch.vs[i]
 		bu := 1 - bw - bv
 		if minOf3(bu, bw, bv) < edgeBarycentricThreshold {
 			out[i] = vec3.Vec3{} // black edge line, matches scalar shadeMesh
@@ -303,5 +330,4 @@ func simdShadeMesh(ox, oy, oz, dx, dy, dz simd.Float32s, tris []scene.Triangle, 
 		n := tris[triIdx].Normal()
 		out[i] = litColor(n, rays[i].Direction, light, vec3.Vec3{X: 0.3, Y: 0.6, Z: 1})
 	}
-	return out
 }

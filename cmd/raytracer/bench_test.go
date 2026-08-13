@@ -124,12 +124,17 @@ func BenchmarkSIMDTriangleIntersect(b *testing.B) {
 	}
 }
 
+// benchCubeTriangles loads the real 12-triangle test cube (not a
+// hand-rolled 2-triangle stand-in) so the intersection microbenchmark
+// is representative of the actual mesh render path: per-triangle
+// fixed overhead (mask conversion, bookkeeping) scales with triangle
+// count and can matter as much as the raw math.
 func benchCubeTriangles() []scene.Triangle {
-	c := float32(0.5)
-	return []scene.Triangle{
-		{V0: vec3.Vec3{X: -c, Y: -c, Z: -c - 1}, V1: vec3.Vec3{X: c, Y: -c, Z: -c - 1}, V2: vec3.Vec3{X: c, Y: c, Z: -c - 1}},
-		{V0: vec3.Vec3{X: -c, Y: -c, Z: -c - 1}, V1: vec3.Vec3{X: c, Y: c, Z: -c - 1}, V2: vec3.Vec3{X: -c, Y: c, Z: -c - 1}},
+	tris, err := loadMeshTriangles("../../testdata/cube.obj", vec3.Vec3{X: 0, Y: 0, Z: -3})
+	if err != nil {
+		panic(err)
 	}
+	return tris
 }
 
 // Full end-to-end render benchmarks (camera + intersection + shading
@@ -158,6 +163,27 @@ func BenchmarkSIMDFullRender(b *testing.B) {
 	lookat := vec3.Vec3{X: 0, Y: 0, Z: -1}
 	for i := 0; i < b.N; i++ {
 		if err := renderSIMD("", "/dev/null", benchRenderWidth, benchRenderHeight, benchRenderSPP, origin, lookat); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+var (
+	benchCamOrigin = vec3.Vec3{X: 2.5, Y: 2, Z: 1.5}
+	benchCamLookat = vec3.Vec3{X: 0, Y: 0, Z: -3}
+)
+
+func BenchmarkScalarFullRenderMesh(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if err := run("../../testdata/cube.obj", "/dev/null", benchRenderWidth, benchRenderHeight, benchRenderSPP, benchCamOrigin, benchCamLookat); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkSIMDFullRenderMesh(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if err := renderSIMD("../../testdata/cube.obj", "/dev/null", benchRenderWidth, benchRenderHeight, benchRenderSPP, benchCamOrigin, benchCamLookat); err != nil {
 			b.Fatal(err)
 		}
 	}

@@ -48,7 +48,8 @@ func TestSIMDSphereHitMatchesScalar(t *testing.T) {
 	nx.Store(nxs)
 	ny.Store(nys)
 	nz.Store(nzs)
-	hitFlags := maskToFlags(hit, lanes)
+	hitFlags := make([]float32, lanes)
+	maskToFlags(hit, hitFlags)
 
 	for i := 0; i < lanes; i++ {
 		_, scalarT, scalarOK := sph.Hit(rays[i], 0.001, 1000)
@@ -97,7 +98,8 @@ func TestSIMDTriangleHitMatchesScalar(t *testing.T) {
 
 	ts := make([]float32, lanes)
 	simdT.Store(ts)
-	hitFlags := maskToFlags(hit, lanes)
+	hitFlags := make([]float32, lanes)
+	maskToFlags(hit, hitFlags)
 
 	for i := 0; i < lanes; i++ {
 		_, scalarT, scalarOK := tri.Hit(rays[i], 0.001, 1000)
