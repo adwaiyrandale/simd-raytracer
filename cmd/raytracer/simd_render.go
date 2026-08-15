@@ -17,6 +17,7 @@ import (
 	"os"
 	"simd"
 
+	"github.com/adwaiyrandale/simd-raytracer/internal/bvh"
 	"github.com/adwaiyrandale/simd-raytracer/internal/camera"
 	"github.com/adwaiyrandale/simd-raytracer/internal/ray"
 	"github.com/adwaiyrandale/simd-raytracer/internal/scene"
@@ -55,14 +56,15 @@ func renderSIMD(objPath, outPath string, width, height, samplesPerPixel int, loo
 	light := vec3.Vec3{X: -1, Y: 1, Z: 1}.Normalize()
 	cam := camera.New(lookfrom, lookat, vec3.Vec3{X: 0, Y: 1, Z: 0}, 90, float32(width)/float32(height))
 
-	var tris []scene.Triangle
+	var root *bvh.Node
 	var sphere scene.Sphere
 	useMesh := objPath != ""
 	if useMesh {
-		tris, err = loadMeshTriangles(objPath, vec3.Vec3{X: 0, Y: 0, Z: -3})
+		tris, err := loadMeshTriangles(objPath, vec3.Vec3{X: 0, Y: 0, Z: -3})
 		if err != nil {
 			return fmt.Errorf("loading %s: %w", objPath, err)
 		}
+		root = bvh.Build(tris)
 	} else {
 		sphere = scene.Sphere{Center: vec3.Vec3{X: 0, Y: 0, Z: -1}, Radius: 0.5}
 	}
@@ -105,7 +107,7 @@ func renderSIMD(objPath, outPath string, width, height, samplesPerPixel int, loo
 				dx, dy, dz := simd.LoadFloat32s(dxs), simd.LoadFloat32s(dys), simd.LoadFloat32s(dzs)
 
 				if useMesh {
-					simdShadeMesh(ox, oy, oz, dx, dy, dz, tris, rayBuf, light, lanes, colorBuf, scratch)
+					simdShadeMesh(ox, oy, oz, dx, dy, dz, root, rayBuf, light, lanes, colorBuf, scratch)
 				} else {
 					simdShadeSphere(ox, oy, oz, dx, dy, dz, sphere, rayBuf, light, lanes, colorBuf, scratch)
 				}
@@ -234,18 +236,18 @@ type simdScratch struct {
 	flagsBuf      []float32
 	nxs, nys, nzs []float32
 	us, vs        []float32
-	closestTriIdx []int
+	closestTri    []scene.Triangle
 }
 
 func newSIMDScratch(lanes int) *simdScratch {
 	return &simdScratch{
-		flagsBuf:      make([]float32, lanes),
-		nxs:           make([]float32, lanes),
-		nys:           make([]float32, lanes),
-		nzs:           make([]float32, lanes),
-		us:            make([]float32, lanes),
-		vs:            make([]float32, lanes),
-		closestTriIdx: make([]int, lanes),
+		flagsBuf:   make([]float32, lanes),
+		nxs:        make([]float32, lanes),
+		nys:        make([]float32, lanes),
+		nzs:        make([]float32, lanes),
+		us:         make([]float32, lanes),
+		vs:         make([]float32, lanes),
+		closestTri: make([]scene.Triangle, lanes),
 	}
 }
 
@@ -280,46 +282,125 @@ func simdShadeSphere(ox, oy, oz, dx, dy, dz simd.Float32s, sph scene.Sphere, ray
 	}
 }
 
-// simdShadeMesh writes lanes shaded colors into out (len must be >=
-// lanes). scratch's buffers are reused, not allocated, per call -
-// this includes the per-triangle loop below, which previously
-// allocated a fresh []float32 on every single triangle iteration.
-func simdShadeMesh(ox, oy, oz, dx, dy, dz simd.Float32s, tris []scene.Triangle, rays []ray.Ray, light vec3.Vec3, lanes int, out []vec3.Vec3, scratch *simdScratch) {
+// meshHitAccum threads the closest-hit-so-far state through a
+// recursive simdBVHTraverse call. Defined with simd.Float32s/Mask32s
+// fields directly (not just []float32) because it's used entirely
+// within this package - see the file-level doc comment on why that's
+// safe here but not across a package boundary.
+type meshHitAccum struct {
+	closestT, closestU, closestV simd.Float32s
+	anyHit                       simd.Mask32s
+}
+
+func newMeshHitAccum() meshHitAccum {
 	tMaxInit := float32(1000)
-	closestT := simd.BroadcastFloat32s(tMaxInit)
-	var closestU, closestV simd.Float32s
-	anyHit := simd.BroadcastFloat32s(0).GreaterEqual(simd.BroadcastFloat32s(1))
-	for i := range scratch.closestTriIdx {
-		scratch.closestTriIdx[i] = -1
+	return meshHitAccum{
+		closestT: simd.BroadcastFloat32s(tMaxInit),
+		anyHit:   simd.BroadcastFloat32s(0).GreaterEqual(simd.BroadcastFloat32s(1)), // all-false
 	}
+}
 
-	for triIdx, tri := range tris {
-		t, _, _, _, u, v, hit := simdTriangleHit(ox, oy, oz, dx, dy, dz, tri, 0.001, tMaxInit)
-		closer := hit.And(t.Less(closestT))
+// simdBoxHit tests a packet of rays against one AABB using the
+// standard branchless min/max slab test (no per-ray sign branch
+// needed, since Min/Max naturally handle either ray direction sign).
+// Mirrors scene.AABB.Hit. Deliberately avoids IfElse (see
+// ifElseFixed's doc comment) since Min/Max/comparisons are enough
+// here and comparisons were verified NOT affected by the IfElse bug.
+func simdBoxHit(ox, oy, oz, dx, dy, dz simd.Float32s, box scene.AABB, tMin, tMax float32) simd.Mask32s {
+	one := simd.BroadcastFloat32s(1)
+	invDx, invDy, invDz := one.Div(dx), one.Div(dy), one.Div(dz)
 
-		closestU = ifElseFixed(closer, u, closestU)
-		closestV = ifElseFixed(closer, v, closestV)
-		closestT = ifElseFixed(closer, t, closestT)
-		anyHit = anyHit.Or(closer)
+	t0x := simd.BroadcastFloat32s(box.Min.X).Sub(ox).Mul(invDx)
+	t1x := simd.BroadcastFloat32s(box.Max.X).Sub(ox).Mul(invDx)
+	tMinV := t0x.Min(t1x).Max(simd.BroadcastFloat32s(tMin))
+	tMaxV := t0x.Max(t1x).Min(simd.BroadcastFloat32s(tMax))
 
-		maskToFlags(closer, scratch.flagsBuf)
-		for lane := 0; lane < lanes; lane++ {
-			if scratch.flagsBuf[lane] != 0 {
-				scratch.closestTriIdx[lane] = triIdx
-			}
+	t0y := simd.BroadcastFloat32s(box.Min.Y).Sub(oy).Mul(invDy)
+	t1y := simd.BroadcastFloat32s(box.Max.Y).Sub(oy).Mul(invDy)
+	tMinV = t0y.Min(t1y).Max(tMinV)
+	tMaxV = t0y.Max(t1y).Min(tMaxV)
+
+	t0z := simd.BroadcastFloat32s(box.Min.Z).Sub(oz).Mul(invDz)
+	t1z := simd.BroadcastFloat32s(box.Max.Z).Sub(oz).Mul(invDz)
+	tMinV = t0z.Min(t1z).Max(tMinV)
+	tMaxV = t0z.Max(t1z).Min(tMaxV)
+
+	return tMaxV.GreaterEqual(tMinV)
+}
+
+// anyLaneSet reports whether mask is true for at least one of the
+// first lanes lanes, using scratch.flagsBuf as scratch space.
+func anyLaneSet(mask simd.Mask32s, lanes int, scratch *simdScratch) bool {
+	maskToFlags(mask, scratch.flagsBuf)
+	for i := 0; i < lanes; i++ {
+		if scratch.flagsBuf[i] != 0 {
+			return true
 		}
 	}
+	return false
+}
 
-	closestU.Store(scratch.us)
-	closestV.Store(scratch.vs)
-	maskToFlags(anyHit, scratch.flagsBuf)
+// simdBVHTraverse walks the scalar BVH built by internal/bvh (its
+// Node type has no simd.Float32s fields, so it crosses the
+// cmd/raytracer package boundary without hitting the archive-boundary
+// bug - only this file's own traversal logic needs to live here).
+// At each internal node, a single SIMD box test against the packet
+// prunes the entire subtree if no ray in the packet can possibly hit
+// it; leaves fall back to the same per-triangle SIMD intersection as
+// the old brute-force path, just over far fewer triangles per ray.
+func simdBVHTraverse(node *bvh.Node, ox, oy, oz, dx, dy, dz simd.Float32s, tMin float32, accum meshHitAccum, scratch *simdScratch, lanes int) meshHitAccum {
+	if node == nil || (node.Tris == nil && node.Left == nil) {
+		return accum
+	}
+
+	if node.Tris != nil {
+		for _, tri := range node.Tris {
+			t, _, _, _, u, v, hit := simdTriangleHit(ox, oy, oz, dx, dy, dz, tri, tMin, 1000)
+			closer := hit.And(t.Less(accum.closestT))
+
+			accum.closestU = ifElseFixed(closer, u, accum.closestU)
+			accum.closestV = ifElseFixed(closer, v, accum.closestV)
+			accum.closestT = ifElseFixed(closer, t, accum.closestT)
+			accum.anyHit = accum.anyHit.Or(closer)
+
+			maskToFlags(closer, scratch.flagsBuf)
+			for lane := 0; lane < lanes; lane++ {
+				if scratch.flagsBuf[lane] != 0 {
+					scratch.closestTri[lane] = tri
+				}
+			}
+		}
+		return accum
+	}
+
+	boxHit := simdBoxHit(ox, oy, oz, dx, dy, dz, node.Bounds, tMin, 1000)
+	if !anyLaneSet(boxHit, lanes, scratch) {
+		return accum // whole subtree pruned: no ray in the packet can hit it
+	}
+	accum = simdBVHTraverse(node.Left, ox, oy, oz, dx, dy, dz, tMin, accum, scratch, lanes)
+	accum = simdBVHTraverse(node.Right, ox, oy, oz, dx, dy, dz, tMin, accum, scratch, lanes)
+	return accum
+}
+
+// simdShadeMesh writes lanes shaded colors into out (len must be >=
+// lanes). scratch's buffers are reused, not allocated, per call.
+// Intersection is SIMD BVH-pruned (simdBVHTraverse), not brute-force
+// over every triangle - brute force alone was measured to lose to
+// scalar on real meshes even with zero allocations, since per-triangle
+// SIMD bookkeeping overhead outweighed the intersection math savings
+// once there was no tree pruning most triangles away first.
+func simdShadeMesh(ox, oy, oz, dx, dy, dz simd.Float32s, root *bvh.Node, rays []ray.Ray, light vec3.Vec3, lanes int, out []vec3.Vec3, scratch *simdScratch) {
+	accum := simdBVHTraverse(root, ox, oy, oz, dx, dy, dz, 0.001, newMeshHitAccum(), scratch, lanes)
+
+	accum.closestU.Store(scratch.us)
+	accum.closestV.Store(scratch.vs)
+	maskToFlags(accum.anyHit, scratch.flagsBuf)
 
 	for i := 0; i < lanes; i++ {
 		if scratch.flagsBuf[i] == 0 {
 			out[i] = skyColor(rays[i])
 			continue
 		}
-		triIdx := scratch.closestTriIdx[i]
 		bw := scratch.us[i]
 		bv := scratch.vs[i]
 		bu := 1 - bw - bv
@@ -327,7 +408,7 @@ func simdShadeMesh(ox, oy, oz, dx, dy, dz simd.Float32s, tris []scene.Triangle, 
 			out[i] = vec3.Vec3{} // black edge line, matches scalar shadeMesh
 			continue
 		}
-		n := tris[triIdx].Normal()
+		n := scratch.closestTri[i].Normal()
 		out[i] = litColor(n, rays[i].Direction, light, vec3.Vec3{X: 0.3, Y: 0.6, Z: 1})
 	}
 }
